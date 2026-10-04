@@ -212,6 +212,85 @@ describe('MessageEventBusDestinationWebhook', () => {
 			expect(sentOptions.headers).not.toHaveProperty('Authorization');
 		});
 
+		describe('generic credential auth', () => {
+			const credentialDetails = { id: 'credential-id', name: 'Auth credential' };
+
+			const createDestination = (genericAuthType: string) => {
+				const { outboundHttp, request } = mockOutboundHttp();
+				const destination = new MessageEventBusDestinationWebhook(
+					mockEventBus,
+					{
+						__type: MessageEventBusDestinationTypeNames.webhook,
+						url: 'https://example.com/webhook',
+						authentication: 'genericCredentialType',
+						genericAuthType,
+						credentials: { [genericAuthType]: credentialDetails },
+					},
+					outboundHttp,
+				);
+				const credentialsHelper = mock<CredentialsHelper>();
+				destination.credentialsHelper = credentialsHelper;
+				return { destination, credentialsHelper, request };
+			};
+
+			const send = async (destination: MessageEventBusDestinationWebhook) =>
+				await destination.receiveFromEventBus({
+					msg: createMessage(),
+					confirmCallback: vi.fn(),
+				} as Parameters<MessageEventBusDestinationWebhook['receiveFromEventBus']>[0]);
+
+			it.each([
+				[
+					'httpHeaderAuth',
+					{ name: 'X-Api-Key', value: 'resolved-secret' },
+					{ headers: expect.objectContaining({ 'X-Api-Key': 'resolved-secret' }) },
+				],
+				[
+					'httpQueryAuth',
+					{ name: 'token', value: 'resolved-secret' },
+					{ qs: expect.objectContaining({ token: 'resolved-secret' }) },
+				],
+				[
+					'httpBasicAuth',
+					{ user: 'n8n', password: 'resolved-secret' },
+					{ auth: { username: 'n8n', password: 'resolved-secret' } },
+				],
+				[
+					'httpDigestAuth',
+					{ user: 'n8n', password: 'resolved-secret' },
+					{ auth: { username: 'n8n', password: 'resolved-secret' } },
+				],
+			])('should resolve %s credentials before sending', async (type, decrypted, expected) => {
+				const { destination, credentialsHelper, request } = createDestination(type);
+				credentialsHelper.getDecrypted.mockResolvedValue(decrypted);
+
+				await send(destination);
+
+				expect(credentialsHelper.getDecrypted).toHaveBeenCalledWith(
+					expect.anything(),
+					credentialDetails,
+					type,
+					'internal',
+					undefined,
+					false, // resolve expressions such as {{ $secrets... }}
+					undefined,
+					{ actor: { kind: 'system', reason: 'log-streaming' } },
+				);
+				expect(request).toHaveBeenCalledWith(expect.objectContaining(expected));
+			});
+
+			it.each(['httpBasicAuth', 'httpDigestAuth', 'httpHeaderAuth', 'httpQueryAuth'])(
+				'should not send when %s credentials cannot be resolved',
+				async (type) => {
+					const { destination, credentialsHelper, request } = createDestination(type);
+					credentialsHelper.getDecrypted.mockRejectedValue(new Error('Could not resolve secret'));
+
+					await expect(send(destination)).rejects.toThrow('Could not resolve secret');
+					expect(request).not.toHaveBeenCalled();
+				},
+			);
+		});
+
 		it('should map the message payload to the JSON body', async () => {
 			const { sentOptions } = await sendThroughDestination({
 				__type: MessageEventBusDestinationTypeNames.webhook,
